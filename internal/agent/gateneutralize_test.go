@@ -257,7 +257,7 @@ func TestOMPGateNeutralization_AppliesSuppressionOverlayAndFlags(t *testing.T) {
 		}
 	}
 
-	args := omp.buildArgs(rawCommand, RunOpts{CWD: "/repo"})
+	args := omp.buildArgs(rawCommand, RunOpts{CWD: "/repo"}, acpxExecTurn())
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00"+rawCommand) {
 		t.Fatalf("args = %q, want the neutralized command behind --agent", args)

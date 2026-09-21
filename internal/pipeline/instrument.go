@@ -228,6 +228,14 @@ func invocationSessionMode(opts agent.RunOpts, result *agent.Result, runErr erro
 		}
 		return db.InvocationModeResumed
 	default:
+		// An empty slot was offered, so the turn could have opened a durable
+		// session - but only an identity the adapter actually reported proves
+		// it did. An adapter whose resume support is a per-target protocol
+		// capability (acpx) answers a target that never advertises it with no
+		// identity at all, and that turn ran cold.
+		if result == nil || result.SessionID == "" {
+			return db.InvocationModeCold
+		}
 		return db.InvocationModeStarted
 	}
 }

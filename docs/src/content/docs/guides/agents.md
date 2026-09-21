@@ -204,7 +204,7 @@ Six global config fields tune resolution and invocation, and the [Global Config 
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude, Codex, Grok, Pi, and Antigravity keep one durable review-fixer session per run, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
+With the default `session_reuse: true`, Claude, Codex, Grok, Pi, Antigravity, and ACP targets that advertise `loadSession` (Cursor does) keep one durable review-fixer session per run, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
 Review turns always run in fresh, session-free invocations: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
 
@@ -326,6 +326,8 @@ Configure custom target commands in the [Global Config Reference](/no-mistakes/r
 no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
 Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text with the common text fallback described above.
 A `model` set under [`agent_config`](/no-mistakes/reference/global-config/#agent_config) for an alias or `acp:<target>` is passed as acpx's own `--model`, so ACP targets can be pinned to an explicit model. acpx exposes no reasoning-effort surface, so `effort` is refused for ACP names rather than silently ignored.
+
+Session resume is an ACP protocol capability rather than a per-target setting: a turn reads the target's own `initialize` response, and only a target that advertises `loadSession` has its `session/new` identity recorded for the run's fixer role. Later fixer turns reconnect to it through ACP's `session/load`, so a review-fix round no longer re-reads the repository from nothing. Cursor advertises the capability; a target that does not is unaffected and keeps running every turn cold. Review turns are never resumed under any target, exactly as described under [Review session reuse](#review-session-reuse).
 
 ## Checking agent availability
 

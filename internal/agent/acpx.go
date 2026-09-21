@@ -11,11 +11,21 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 const acpxScannerMaxTokenSize = 256 * 1024 * 1024
+
+// acpxSessionCleanupTimeout bounds the best-effort commands that release a
+// resumed turn's acpx session record. They run after the turn, on a context
+// the turn's own cancellation cannot cut short, so they need a bound of their
+// own - and it has to stay well inside the daemon's own 30s wait for a
+// cancelled run, or a wedged acpx queue owner spends the whole window here and
+// leaves nothing for the rest of the run's teardown. Both commands are
+// sub-second in normal operation.
+const acpxSessionCleanupTimeout = 5 * time.Second
 
 type acpxAgent struct {
 	bin        string
@@ -43,6 +53,20 @@ func (a *acpxAgent) Name() string { return "acp:" + a.target }
 
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 
+// SupportsSessionResume reports the ACP transport's durable-session
+// capability, not any one target's. no-mistakes never speaks ACP itself: acpx
+// is the client, and it mirrors the whole JSON-RPC conversation on stdout, so
+// a turn reads the target's own `initialize` response for
+// agentCapabilities.loadSession and only mints an identity when the target
+// advertised it (acpxSessionFacts.resumableSessionID).
+//
+// That advertised capability is the isolation gate, and deliberately so: a
+// target that does not advertise loadSession never gets an identity recorded,
+// so nothing ever asks to resume it and its turns keep the one-shot `exec`
+// shape they have always had. There is no target allowlist here on purpose -
+// the capability generalizes to every ACP target on its own.
+func (a *acpxAgent) SupportsSessionResume() bool { return true }
+
 // NeutralizesGateInstructions reports whether this acpx invocation launches its
 // target with the target repository's project instructions neutralized. Only
 // the omp target under the trusted opt-out (and only its default launch)
@@ -66,7 +90,20 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	if err != nil {
 		return nil, fmt.Errorf("acpx omp gate neutralization: %w", err)
 	}
-	args := a.buildArgs(rawCommand, opts)
+	resumeID := ""
+	if opts.Session != nil {
+		resumeID = opts.Session.ID
+	}
+	turn := acpxExecTurn()
+	if resumeID != "" {
+		name := acpxSessionName(resumeID)
+		if err := a.loadSession(ctx, rawCommand, opts, name, resumeID); err != nil {
+			return nil, err
+		}
+		defer a.releaseSession(ctx, rawCommand, opts, name)
+		turn = acpxPromptTurn(name)
+	}
+	args := a.buildArgs(rawCommand, opts, turn)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
@@ -96,7 +133,8 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
+	var facts acpxSessionFacts
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage, &facts)
 	// Estimate before any return, not just the success one: acpx can report an
 	// input-only usage event and then fail, and a reported usage with no output
 	// count would otherwise record the text it did stream as a reported zero.
@@ -127,8 +165,80 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return resultFromUsage(usage), stdinErr
 	}
 	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	if err == nil && res != nil {
+		res.SessionID = facts.resumableSessionID(resumeID)
+		res.Resumed = resumeID != ""
+	}
 	emitAgentExited(opts, a.Name(), pid, err)
 	return res, err
+}
+
+// acpxExecTurn is acpx's one-shot prompt: it opens a fresh ACP session and
+// saves no record. Every turn that is not resuming uses it, exactly as every
+// acpx turn did before resume existed.
+func acpxExecTurn() []string { return []string{"exec", "--file", "-"} }
+
+// acpxPromptTurn is acpx's saved-session prompt, the only form that reconnects
+// to an existing ACP session rather than opening a new one.
+func acpxPromptTurn(name string) []string {
+	return []string{"prompt", "--session", name, "--file", "-"}
+}
+
+// acpxSessionName is the acpx session-record name for an ACP session
+// identity. acpx keys records by (name, cwd, agent command), so naming the
+// record after the identity it carries keeps concurrent runs, worktrees, and
+// roles from ever sharing one.
+func acpxSessionName(sessionID string) string { return "no-mistakes-" + sessionID }
+
+// loadSession binds an acpx session record to the ACP identity this run
+// already minted, which is what makes the prompt that follows reconnect with
+// session/load instead of session/new. acpx owns the ACP conversation, so
+// `sessions ensure --resume-session` is how a stored identity reaches the
+// protocol.
+//
+// A failure is returned rather than swallowed: the caller in
+// pipeline.RunSessions answers a failed resume by dropping the dead identity
+// and re-running the same turn cold, so the turn is never skipped.
+func (a *acpxAgent) loadSession(ctx context.Context, rawCommand string, opts RunOpts, name, sessionID string) error {
+	args := a.buildArgs(rawCommand, opts, []string{"sessions", "ensure", "--name", name, "--resume-session", sessionID})
+	cmd := exec.CommandContext(ctx, a.bin, args...)
+	cmd.Dir = opts.CWD
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("acpx load session %s: %w: %s", sessionID, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// releaseSession closes the acpx session record a resumed turn used. Only the
+// resume path needs it: `exec` is one-shot and leaves nothing behind, while a
+// named session is served by a detached acpx queue-owner process that outlives
+// the turn's process tree and keeps its agent child alive for the idle TTL. A
+// turn cut short leaves that owner mid-prompt, so cancel it first rather than
+// letting it keep working on a worktree the run has abandoned.
+//
+// Closing the record does not end the ACP session, which lives on the target's
+// side and stays loadable, so the next round still resumes.
+func (a *acpxAgent) releaseSession(ctx context.Context, rawCommand string, opts RunOpts, name string) {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpxSessionCleanupTimeout)
+	defer cancel()
+	if ctx.Err() != nil {
+		a.runSessionCommand(cleanup, rawCommand, opts, "cancel", "--session", name)
+	}
+	a.runSessionCommand(cleanup, rawCommand, opts, "sessions", "close", name)
+}
+
+// runSessionCommand runs a best-effort acpx session-management command. Its
+// outcome never changes the turn's: the prompt has already been answered (or
+// abandoned) by the time these run.
+func (a *acpxAgent) runSessionCommand(ctx context.Context, rawCommand string, opts RunOpts, command ...string) {
+	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(rawCommand, opts, command)...)
+	cmd.Dir = opts.CWD
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	shellenv.ConfigureShellCommand(cmd)
+	_ = shellenv.RunShellCommand(cmd)
 }
 
 func (a *acpxAgent) Close() error {
@@ -155,8 +265,12 @@ func (a *acpxAgent) resolveRawCommand() (string, error) {
 	return ompNeutralizedACPCommand(a.overlayPath), nil
 }
 
-func (a *acpxAgent) buildArgs(rawCommand string, opts RunOpts) []string {
-	args := make([]string, 0, 12)
+// buildArgs assembles an acpx invocation: the global options this adapter
+// always applies, then the target selection, then command - the acpx
+// subcommand and its own arguments (a prompt turn, or one of the session
+// commands the resume path uses).
+func (a *acpxAgent) buildArgs(rawCommand string, opts RunOpts, command []string) []string {
+	args := make([]string, 0, 12+len(command))
 	if rawCommand != "" {
 		args = append(args, "--agent", rawCommand)
 	}
@@ -178,8 +292,7 @@ func (a *acpxAgent) buildArgs(rawCommand string, opts RunOpts) []string {
 	if rawCommand == "" {
 		args = append(args, a.target)
 	}
-	args = append(args, "exec", "--file", "-")
-	return args
+	return append(args, command...)
 }
 
 func acpxStdinError(err error) error {
@@ -207,11 +320,55 @@ func buildACPStructuredPrompt(prompt string, schema json.RawMessage) string {
 		string(schema)
 }
 
+// acpxSessionFacts is what one turn's ACP conversation reported about its
+// session. acpx relays both directions of the JSON-RPC exchange on stdout, so
+// these are the target's own answers rather than anything inferred here.
+type acpxSessionFacts struct {
+	// loadSession is the agentCapabilities.loadSession flag the target
+	// advertised in its `initialize` response.
+	loadSession bool
+	// sessionID is the identity the target minted in its `session/new`
+	// response. A `session/load` answers without one.
+	sessionID string
+}
+
+// resumableSessionID reports the identity a later turn of the same run may
+// resume, or "" when there is none to record.
+//
+// The advertised-loadSession gate applies to MINTING an identity only. A turn
+// that already resumed one re-reports it unconditionally, because a resumed
+// turn cannot re-answer the question the gate asks: `initialize` is mirrored
+// by whichever acpx process opens the ACP connection, and a `prompt --session`
+// turn is served by an already-initialized queue owner that need not repeat
+// it. Re-checking the flag there would report no identity on the second
+// round, drop the stored slot, and send the third round cold - the exact cost
+// this resume path exists to remove. The identity only exists at all because
+// a prior turn saw the capability advertised, so its provenance is unchanged.
+//
+// session/load answers without an id, so a resumed turn falls back to
+// re-reporting the one it loaded.
+func (f acpxSessionFacts) resumableSessionID(resumeID string) string {
+	if !f.loadSession && resumeID == "" {
+		return ""
+	}
+	if f.sessionID != "" {
+		return f.sessionID
+	}
+	return resumeID
+}
+
 type acpxJSONMessage struct {
 	Method string         `json:"method"`
 	Error  *acpxJSONError `json:"error"`
 	Result struct {
 		Usage acpxUsageFields `json:"usage"`
+		// SessionID is carried by the `session/new` response only. Live
+		// session ids elsewhere on the stream ride params, not result.
+		SessionID string `json:"sessionId"`
+		// AgentCapabilities is carried by the `initialize` response only.
+		AgentCapabilities struct {
+			LoadSession bool `json:"loadSession"`
+		} `json:"agentCapabilities"`
 	} `json:"result"`
 	Params struct {
 		Update acpxSessionUpdate `json:"update"`
@@ -260,7 +417,7 @@ type acpxUsageFields struct {
 // parseAcpxJSONEvents streams acpx's JSON events and returns the assistant
 // text accumulated so far, on its error paths too, so a turn that fails partway
 // can still account for the output acpx already produced.
-func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage) (string, string, error) {
+func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, facts *acpxSessionFacts) (string, string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
 	var output strings.Builder
@@ -287,6 +444,12 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			stdoutErr = msg.Error.Message
 		}
 		*usage = acpxMaxUsage(*usage, acpxUsageFieldsToTokenUsage(msg.Result.Usage))
+		if msg.Result.AgentCapabilities.LoadSession {
+			facts.loadSession = true
+		}
+		if msg.Result.SessionID != "" {
+			facts.sessionID = msg.Result.SessionID
+		}
 		if msg.Method != "session/update" {
 			continue
 		}
