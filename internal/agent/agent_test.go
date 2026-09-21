@@ -64,7 +64,7 @@ func TestNewWithOptions_ACPRegistryOverride(t *testing.T) {
 	if !ok {
 		t.Fatalf("agent type = %T, want *acpxAgent", a)
 	}
-	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work", CWD: "/repo"})
+	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work", CWD: "/repo"}, acpxExecTurn())
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00node /tmp/mock-acp.mjs") {
 		t.Fatalf("args = %q, want raw --agent override", args)
@@ -89,7 +89,7 @@ func TestACPAliasUsesDefaultCommand(t *testing.T) {
 	if acpx.rawCommand != "cursor-agent acp" {
 		t.Errorf("rawCommand = %q, want cursor-agent acp", acpx.rawCommand)
 	}
-	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work"})
+	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work"}, acpxExecTurn())
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00cursor-agent acp") {
 		t.Fatalf("args = %q, want alias default command", args)
@@ -111,7 +111,7 @@ func TestACPTargetUsesAliasDefaultCommand(t *testing.T) {
 	if acpx.rawCommand != "cursor-agent acp" {
 		t.Errorf("rawCommand = %q, want cursor-agent acp", acpx.rawCommand)
 	}
-	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work"})
+	args := acpx.buildArgs(acpx.rawCommand, RunOpts{Prompt: "do work"}, acpxExecTurn())
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00cursor-agent acp") {
 		t.Fatalf("args = %q, want target default command", args)
@@ -152,7 +152,7 @@ func TestACPAliasBlankRegistryOverrideUsesDefaultCommand(t *testing.T) {
 
 func TestACPAgentBuildArgsUsesExecMode(t *testing.T) {
 	a := &acpxAgent{target: "gemini"}
-	args := a.buildArgs(a.rawCommand, RunOpts{Prompt: "do work"})
+	args := a.buildArgs(a.rawCommand, RunOpts{Prompt: "do work"}, acpxExecTurn())
 
 	if got, want := args[len(args)-4:], []string{"gemini", "exec", "--file", "-"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("trailing args = %q, want %q", got, want)
@@ -194,7 +194,7 @@ func TestParseAcpxJSONEventsParsesUsageFields(t *testing.T) {
 	}, "\n") + "\n"
 	var usage TokenUsage
 
-	text, stdoutErr, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage)
+	text, stdoutErr, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, &acpxSessionFacts{})
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}
@@ -214,7 +214,7 @@ func TestParseAcpxJSONEventsParsesCacheWriteUsageFields(t *testing.T) {
 	events := `{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"usage_update","input_tokens":5,"output_tokens":3,"cache_write_tokens":7}}}` + "\n"
 	var usage TokenUsage
 
-	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage)
+	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, &acpxSessionFacts{})
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}
@@ -227,7 +227,7 @@ func TestParseAcpxJSONEventsParsesNormalizedCachedUsageFields(t *testing.T) {
 	events := `{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"usage_update","inputTokens":5,"outputTokens":3,"cachedReadTokens":11,"cachedWriteTokens":13}}}` + "\n"
 	var usage TokenUsage
 
-	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage)
+	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, &acpxSessionFacts{})
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}
@@ -241,7 +241,7 @@ func TestParseAcpxJSONEventsParsesResultUsage(t *testing.T) {
 	events := `{"jsonrpc":"2.0","id":1,"result":{"usage":{"input_tokens":21,"output_tokens":8,"cachedReadTokens":5,"cachedWriteTokens":2}}}` + "\n"
 	var usage TokenUsage
 
-	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage)
+	_, _, err := parseAcpxJSONEvents(context.Background(), strings.NewReader(events), nil, &usage, &acpxSessionFacts{})
 	if err != nil {
 		t.Fatalf("parseAcpxJSONEvents() error = %v", err)
 	}

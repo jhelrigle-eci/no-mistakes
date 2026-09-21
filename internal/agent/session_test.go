@@ -9,8 +9,14 @@ import (
 // TestSupportsSessionResume_PerAdapter pins which adapters advertise durable
 // session resume. Claude, Codex, Grok, Pi, and Antigravity have native resume
 // (Claude/Grok --resume, Codex exec resume, Pi --session, Antigravity
-// --conversation); every other adapter must run cold so the pipeline's fallback
-// path records the cold invocation instead of assuming reuse.
+// --conversation), and acpx has ACP's session/load; every other adapter must
+// run cold so the pipeline's fallback path records the cold invocation instead
+// of assuming reuse.
+//
+// acpx answers for the transport, not for one target: whether a given ACP
+// target is actually resumed is decided by the loadSession capability it
+// advertises at initialize, which no bool known before the target runs can
+// report. See acpxAgent.SupportsSessionResume.
 func TestSupportsSessionResume_PerAdapter(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -25,7 +31,7 @@ func TestSupportsSessionResume_PerAdapter(t *testing.T) {
 		{"opencode", &opencodeAgent{bin: "opencode"}, false},
 		{"pi", &piAgent{bin: "pi"}, true},
 		{"copilot", &copilotAgent{bin: "copilot"}, false},
-		{"acpx", &acpxAgent{bin: "acpx", target: "gemini"}, false},
+		{"acpx", &acpxAgent{bin: "acpx", target: "gemini"}, true},
 		{"noop", NewNoop(), false},
 	}
 	for _, tc := range cases {
