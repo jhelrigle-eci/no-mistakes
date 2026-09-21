@@ -337,6 +337,7 @@ Rules:
 - When you report a defect, enumerate in that same finding every other place in the changed code where the same invariant is violated or must hold (another axis, direction, or representation; a sibling call path, command, action, or state transition; another consumer of the same input, field, or record), each as file:line with a few words. Report the class once, anchored at the primary site, instead of one site now and its siblings after the next fix. When the defect is incomplete validation of an input, response, or record, list every consumed field that is still unvalidated in that one finding.
 - Use severity "error" for problems that should absolutely not get merged, "warning" for things that are worth addressing but can be done in a follow up, and "info" for things that are nice to have.
 - Be concise and actionable. No generic advice like "add more tests".
+- Write each finding description as plain prose. Open with the defect. Keep file, line, what is wrong, and why it matters. One idea per sentence. Do not restate the review task. Do not hedge. Do not use filler. Sibling sites stay file:line plus a few words, not a second narrative.
 - Only comment on things that genuinely matter.
 - Do NOT report styling, formatting, linting, compilation, or type-checking issues.
 - If the change is clean, return an empty findings array.
