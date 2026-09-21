@@ -27,9 +27,23 @@ const (
 // only - the session id the target minted. A resumed turn answers without one,
 // exactly as ACP's session/load does. The session-management subcommands the
 // resume path issues exit silently, like the real ones.
-func writeSessionStubAcpx(t *testing.T, dir, initLine, newSessionID string) string {
+//
+// mirrorInitOnPrompt selects which of the two shapes a `prompt --session` turn
+// takes. Whichever acpx process opens the ACP connection mirrors initialize,
+// and a prompt is served by an already-initialized queue owner that need not
+// repeat it, so a prompt turn may legitimately carry no capability line at
+// all. Both shapes must keep the identity.
+func writeSessionStubAcpx(t *testing.T, dir, initLine, newSessionID string, mirrorInitOnPrompt bool) string {
 	t.Helper()
 	path := filepath.Join(dir, "acpx")
+	initGuard := ""
+	if !mirrorInitOnPrompt {
+		initGuard = `if [ "$mode" != "prompt" ]; then`
+	}
+	initEnd := ""
+	if initGuard != "" {
+		initEnd = "fi"
+	}
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$NM_TEST_ACPX_LOG"
 mode=""
@@ -42,7 +56,9 @@ if [ "$mode" = "sessions" ] || [ "$mode" = "cancel" ]; then
 	exit 0
 fi
 cat > /dev/null
+` + initGuard + `
 printf '%s\n' '` + initLine + `'
+` + initEnd + `
 if [ "$mode" = "exec" ]; then
 	printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"` + newSessionID + `"}}'
 fi
@@ -80,7 +96,7 @@ func TestAcpxAgent_AdvertisedLoadSessionIsMintedThenResumedWithSessionLoad(t *te
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "invocations.log")
 	t.Setenv("NM_TEST_ACPX_LOG", logPath)
-	a := &acpxAgent{bin: writeSessionStubAcpx(t, dir, acpxInitLoadSession, sessionID), target: "cursor"}
+	a := &acpxAgent{bin: writeSessionStubAcpx(t, dir, acpxInitLoadSession, sessionID, true), target: "cursor"}
 
 	// Turn one has no identity to resume, so it must take the cold path.
 	first, err := a.Run(context.Background(), RunOpts{Prompt: "first turn", CWD: dir})
@@ -132,6 +148,29 @@ func TestAcpxAgent_AdvertisedLoadSessionIsMintedThenResumedWithSessionLoad(t *te
 			t.Errorf("resumed turn fell back to the one-shot exec form: %q", inv)
 		}
 	}
+
+	// Turn three is the round that decides whether resume actually compounds.
+	// A prompt is served by an already-initialized acpx queue owner, so it
+	// need not re-mirror initialize and the capability line can be absent
+	// from the turn's stdout entirely. Re-asking the advertised-capability
+	// question there would report no identity, drop the stored slot, and send
+	// the next round cold - so the identity has to survive a turn that never
+	// repeats the advertisement.
+	a.bin = writeSessionStubAcpx(t, dir, acpxInitLoadSession, sessionID, false)
+	third, err := a.Run(context.Background(), RunOpts{
+		Prompt:  "third turn",
+		CWD:     dir,
+		Session: &SessionRef{ID: sessionID, Agent: a.Name()},
+	})
+	if err != nil {
+		t.Fatalf("third turn: %v", err)
+	}
+	if !third.Resumed {
+		t.Error("third turn did not report Resumed")
+	}
+	if third.SessionID != sessionID {
+		t.Errorf("third turn SessionID = %q, want the loaded id %q kept even though the prompt turn never re-mirrored initialize", third.SessionID, sessionID)
+	}
 }
 
 // TestAcpxAgent_TargetWithoutLoadSessionRecordsNoIdentity proves the isolation
@@ -144,7 +183,7 @@ func TestAcpxAgent_TargetWithoutLoadSessionRecordsNoIdentity(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "invocations.log")
 	t.Setenv("NM_TEST_ACPX_LOG", logPath)
-	a := &acpxAgent{bin: writeSessionStubAcpx(t, dir, acpxInitNoLoadSession, "unadvertised-id"), target: "gemini"}
+	a := &acpxAgent{bin: writeSessionStubAcpx(t, dir, acpxInitNoLoadSession, "unadvertised-id", true), target: "gemini"}
 
 	res, err := a.Run(context.Background(), RunOpts{Prompt: "turn", CWD: dir})
 	if err != nil {

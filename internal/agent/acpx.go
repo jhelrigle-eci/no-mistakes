@@ -57,7 +57,7 @@ func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 // capability, not any one target's. no-mistakes never speaks ACP itself: acpx
 // is the client, and it mirrors the whole JSON-RPC conversation on stdout, so
 // a turn reads the target's own `initialize` response for
-// agentCapabilities.loadSession and only reports an identity when the target
+// agentCapabilities.loadSession and only mints an identity when the target
 // advertised it (acpxSessionFacts.resumableSessionID).
 //
 // That advertised capability is the isolation gate, and deliberately so: a
@@ -333,12 +333,22 @@ type acpxSessionFacts struct {
 }
 
 // resumableSessionID reports the identity a later turn of the same run may
-// resume, or "" when there is none to record. It is empty unless the target
-// advertised loadSession: an ACP target that does not advertise it never has
-// an identity stored, so nothing ever tries to resume it. A turn that resumed
-// re-reports the identity it loaded, because session/load answers without one.
+// resume, or "" when there is none to record.
+//
+// The advertised-loadSession gate applies to MINTING an identity only. A turn
+// that already resumed one re-reports it unconditionally, because a resumed
+// turn cannot re-answer the question the gate asks: `initialize` is mirrored
+// by whichever acpx process opens the ACP connection, and a `prompt --session`
+// turn is served by an already-initialized queue owner that need not repeat
+// it. Re-checking the flag there would report no identity on the second
+// round, drop the stored slot, and send the third round cold - the exact cost
+// this resume path exists to remove. The identity only exists at all because
+// a prior turn saw the capability advertised, so its provenance is unchanged.
+//
+// session/load answers without an id, so a resumed turn falls back to
+// re-reporting the one it loaded.
 func (f acpxSessionFacts) resumableSessionID(resumeID string) string {
-	if !f.loadSession {
+	if !f.loadSession && resumeID == "" {
 		return ""
 	}
 	if f.sessionID != "" {
