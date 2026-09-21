@@ -2,9 +2,36 @@
 
 This file is for agentic coding tools working in this repo.
 
-This repository is a Go CLI app named `no-mistakes`.
-The binary entrypoint is `cmd/no-mistakes`; implementation code lives under `internal/`, and the package names there are the layout map (CLI in `internal/cli`, daemon in `internal/daemon`, pipeline and steps in `internal/pipeline`, agent adapters in `internal/agent`, terminal UI in `internal/tui`, shared infrastructure in `internal/git`, `internal/ipc`, `internal/config`, `internal/db`, `internal/paths`, `internal/types`).
+## Architecture
+
+`no-mistakes` is a Go CLI that gates a change through a pipeline of steps (intent, rebase, review, test, document, lint, push, PR, CI) before it reaches the configured push target. A long-lived local daemon owns run state in SQLite and executes the pipeline; the CLI and the terminal UI talk to it over a local socket (Unix socket, named pipe on Windows), and the judgment steps drive coding-agent CLIs (claude, codex, opencode, pi, ...) as subprocesses.
+
+Top-level layout - the package names under `internal/` are the map, so read the directory listing before searching:
+
+- `cmd/` - entrypoints: `no-mistakes` (the binary), plus `genskill`, `publish-channels`, `recordfixture`, and `fakeagent` (the test double the e2e suite drives).
+- `internal/` - all implementation: CLI in `cli`, daemon in `daemon`, pipeline and its steps in `pipeline`, agent adapters in `agent`, forge backends in `scm/<provider>`, terminal UI in `tui`, shared infrastructure in `git`, `ipc`, `config`, `db`, `paths`, `types`.
+- `docs/` - the user documentation site; `docs/src/content/docs` owns user-facing semantics, while code comments own local rationale.
+- `.github/actions/require-no-mistakes/` - the PR-enforcement action (`verify.py`), exercised by Go tests at the repo root.
+- `skills/`, `.claude/skills/` - agent guidance; `skills/no-mistakes/SKILL.md` is generated (see below).
+- `scripts/`, `benchmarks/` - the e2e wrapper and published measurement evidence.
+
 Build, test, and release commands are owned by the `Makefile`; read it for the full target list instead of relying on a copy here.
+
+Where tests live:
+
+- Package tests sit beside the code as `_test.go`; `go test -race ./...` runs all of them except the e2e suite.
+- Repo-root `*_test.go` files test the non-Go assets (workflows, install scripts, the `Makefile`, the enforcement action).
+- The e2e suite is `internal/e2e` plus step-local files, all behind the `e2e` build tag, so it is invisible to a plain `go test`; run it with `make e2e`.
+- `internal/pipeline/steps/citest` exists only to keep the CI-monitor tests out of `internal/pipeline/steps`' package timeout (see Pipeline step tests below).
+
+Do not hand-edit:
+
+- `CHANGELOG.md` and `.release-please-manifest.json` - release-please owns them and `.github/workflows/guard-generated-files.yml` fails a hand edit.
+- `skills/no-mistakes/SKILL.md` - generated from `internal/skill`; edit the source and run `make skill` (`make lint` fails on drift).
+- `internal/e2e/fixtures/` - recorded from the real agent CLIs by `make e2e-record`, which spends real API quota.
+- `demo.gif` / `demo.mp4` (`make demo`) and `docs/package-lock.json`.
+
+## Local verification
 
 Safest local verification sequence after non-trivial changes:
 
@@ -13,6 +40,8 @@ Safest local verification sequence after non-trivial changes:
 - `go test -race ./...` (the e2e suite is behind the `e2e` build tag and excluded)
 - `make e2e` when touching agent integrations, the e2e harness, or recorded fixtures
 - `go build -o ./bin/no-mistakes ./cmd/no-mistakes`
+
+## Subsystem notes
 
 **Self-update channel manifest (`internal/update`)**
 
