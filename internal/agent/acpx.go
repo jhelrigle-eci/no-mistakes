@@ -21,8 +21,11 @@ const acpxScannerMaxTokenSize = 256 * 1024 * 1024
 // acpxSessionCleanupTimeout bounds the best-effort commands that release a
 // resumed turn's acpx session record. They run after the turn, on a context
 // the turn's own cancellation cannot cut short, so they need a bound of their
-// own.
-const acpxSessionCleanupTimeout = 30 * time.Second
+// own - and it has to stay well inside the daemon's own 30s wait for a
+// cancelled run, or a wedged acpx queue owner spends the whole window here and
+// leaves nothing for the rest of the run's teardown. Both commands are
+// sub-second in normal operation.
+const acpxSessionCleanupTimeout = 5 * time.Second
 
 type acpxAgent struct {
 	bin        string
@@ -202,7 +205,7 @@ func (a *acpxAgent) loadSession(ctx context.Context, rawCommand string, opts Run
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	shellenv.ConfigureShellCommand(cmd)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("acpx load session %s: %w: %s", sessionID, err, strings.TrimSpace(string(out)))
 	}
@@ -235,7 +238,7 @@ func (a *acpxAgent) runSessionCommand(ctx context.Context, rawCommand string, op
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	shellenv.ConfigureShellCommand(cmd)
-	_ = cmd.Run()
+	_ = shellenv.RunShellCommand(cmd)
 }
 
 func (a *acpxAgent) Close() error {

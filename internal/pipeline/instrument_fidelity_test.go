@@ -455,6 +455,56 @@ func TestPerfRecording_FailedTurnInADifferentSessionRecordsFallback(t *testing.T
 	assertPtr(t, "input", invs[0].InputTokens, 900)
 }
 
+// unidentifiedSessionAgent models acpx: the transport supports resume, so a
+// session slot is always offered, but a target that never advertises the
+// protocol capability answers with no identity and keeps its one-shot shape.
+type unidentifiedSessionAgent struct{}
+
+func (unidentifiedSessionAgent) Name() string                { return "acp:gemini" }
+func (unidentifiedSessionAgent) Close() error                { return nil }
+func (unidentifiedSessionAgent) SupportsSessionResume() bool { return true }
+func (unidentifiedSessionAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return &agent.Result{
+		Usage:         agent.TokenUsage{InputTokens: 700, Reported: true},
+		UsageReported: true,
+	}, nil
+}
+
+// TestPerfRecording_RequestedSessionWithoutAnIdentityIsCold proves an offered
+// session slot the adapter left unfilled is recorded as a cold turn. Claiming
+// a durable session began - with an empty session key, because there is no
+// identity to fingerprint - would have `no-mistakes stats` report reuse that
+// never existed for every ACP target whose agent declines loadSession.
+func TestPerfRecording_RequestedSessionWithoutAnIdentityIsCold(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	wrapped := &perfRecordingAgent{
+		inner:    unidentifiedSessionAgent{},
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepReview,
+		round:    func() int { return 1 },
+	}
+	sessions := NewRunSessions(database, run.ID, wrapped, true)
+	if _, err := sessions.Run(context.Background(), wrapped, SessionRoleFixer, agent.RunOpts{Purpose: "review-fix"}, nil); err != nil {
+		t.Fatalf("fixer turn: %v", err)
+	}
+
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("got %d rows, want 1", len(invs))
+	}
+	if invs[0].SessionMode != db.InvocationModeCold {
+		t.Fatalf("session mode = %q, want %q", invs[0].SessionMode, db.InvocationModeCold)
+	}
+	if invs[0].SessionKey != "" {
+		t.Fatalf("session key = %q, want none for a turn with no identity", invs[0].SessionKey)
+	}
+	assertPtr(t, "input", invs[0].InputTokens, 700)
+}
+
 func TestPerfRecording_FailedInvocationWithoutUsageIsUnknown(t *testing.T) {
 	inv := recordOneInvocation(t, failedNoUsageAgent{err: errors.New("pi exited: status 1")}, context.Background())
 	if inv.ExitStatus != "error" {
