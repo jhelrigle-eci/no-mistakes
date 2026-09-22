@@ -1874,6 +1874,7 @@ func TestReviewStep_SimplificationSectionContract(t *testing.T) {
 		"Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage",
 		"Do a full review pass before returning",
 		"Classify by the remedy, not only by the topic.",
+		"Write each finding description as plain prose. Open with the defect. Keep file, line, what is wrong, and why it matters. One idea per sentence. Do not restate the review task. Do not hedge. Do not use filler. Sibling sites stay file:line plus a few words, not a second narrative.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("review prompt dropped an existing obligation %q:\n%s", want, prompt)
